@@ -48,6 +48,9 @@ var opts struct {
 	// ReqsPerSec  uint   `short:"r" long:"allowed-requests-per-sec" description:"allowed requests per second per ip"`
 	SubmitURL  string `short:"u" long:"submit-url" description:"url to forward nonces to (pool, wallet)" required:"true"`
 	ListenAddr string `short:"l" long:"listen-address" description:"address proxy listens on"`
+
+	CertFile string `short:"c" long:"cert-file" description:"certificate file for tls"`
+	KeyFile  string `short:"k" long:"key-file" description:"key file for tls"`
 }
 
 type minerRound struct {
@@ -223,7 +226,12 @@ func main() {
 
 	c = cache.New(defaultCacheExpiration, defaultCacheExpiration)
 
-	err := fasthttp.ListenAndServe(opts.ListenAddr, requestHandler)
+	var err error
+	if opts.CertFile == "" {
+		err = fasthttp.ListenAndServe(opts.ListenAddr, requestHandler)
+	} else {
+		err = fasthttp.ListenAndServeTLS(opts.ListenAddr, opts.CertFile, opts.KeyFile, requestHandler)
+	}
 	if err != nil {
 		log.Fatalf("listen and serve: %s", err)
 	}

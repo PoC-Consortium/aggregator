@@ -3,13 +3,11 @@
 # Aggregator - Burstminer Proxy
 
 ### Requirements
-- go dep
-- go
+- go >= 1.11
 
 ### Compile
 
 ``` shell
-dep ensure
 go build
 ```
 

@@ -32,8 +32,7 @@ var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 var submitURL string
 var c *cache.Cache
-var miningInfoBytes atomic.Value
-var currentHeight uint64
+var curMiningInfo atomic.Value
 var client *fasthttp.Client
 var minersPerIP int
 
@@ -65,6 +64,7 @@ type miningInfo struct {
 	BaseTarget     uint64 `json:"baseTarget"`
 	TargetDeadline uint64 `json:"targetDeadline"`
 	GenSig         string `json:"generationSignature"`
+	bytes          []byte
 }
 
 type ipData struct {
@@ -163,9 +163,22 @@ func refreshMiningInfo() error {
 	if err := json.Unmarshal(respBody, &mi); err != nil {
 		return err
 	}
-	if mi.Height > currentHeight {
-		currentHeight = mi.Height
-		miningInfoBytes.Store(respBody)
+	var curMi *miningInfo
+	if curMiV := curMiningInfo.Load(); curMiV != nil {
+		curMi = curMiV.(*miningInfo)
+	}
+	switch {
+	case curMi == nil || curMi.Height < mi.Height:
+		mi.bytes = respBody
+		curMiningInfo.Store(&mi)
+	case curMi.Height > mi.Height: // fork handling
+		mi.bytes = respBody
+		curMiningInfo.Store(&mi)
+		c.Flush()
+	case curMi.BaseTarget != mi.BaseTarget: // fork handling
+		mi.bytes = respBody
+		curMiningInfo.Store(&mi)
+		c.Flush()
 	}
 	return nil
 }
@@ -174,7 +187,7 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 	ip := ctx.RemoteIP()
 	switch reqType := string(ctx.FormValue("requestType")); reqType {
 	case "getMiningInfo":
-		ctx.SetBody(miningInfoBytes.Load().([]byte))
+		ctx.SetBody(curMiningInfo.Load().(*miningInfo).bytes)
 	case "submitNonce":
 		round, err := parseRound(ctx)
 		if err != nil {
@@ -185,7 +198,12 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 		switch res := tryUpdateRound(ctx, ip.String(), round); res {
 		case updated:
 		case notUpdated:
-			ctx.SetBody([]byte(fmt.Sprintf("{\"deadline\":%d,\"result\":\"success\"}", round.Deadline)))
+			ctx.SetBody([]byte(
+				fmt.Sprintf(
+					"{\"deadline\":%d,\"result\":\"success\"}",
+					// stupid miners send unadjusted deadlines, but expect adjusted :-(
+					round.Deadline/curMiningInfo.Load().(*miningInfo).BaseTarget,
+				)))
 		case exceededMinersPerIP:
 			ctx.SetStatusCode(fasthttp.StatusBadRequest)
 			ctx.SetBody(errBytesFor(2, errTooManySubmissionsDifferenMiners.Error()))

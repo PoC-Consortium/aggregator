@@ -59,10 +59,30 @@ type minerRound struct {
 	Nonce     uint64 `url:"nonce"`
 }
 
+// handling json type inconsistencies of pools and wallets. integers are sometimes sent as string
+// https://engineering.bitnami.com/articles/dealing-with-json-with-non-homogeneous-types-in-go.html
+type FlexUInt64 int
+
+func (fi *FlexUInt64) UnmarshalJSON(b []byte) error {
+    if b[0] != '"' {
+        return json.Unmarshal(b, (*int)(fi))
+    }
+    var s string
+    if err := json.Unmarshal(b, &s); err != nil {
+        return err
+    }
+    i, err := strconv.Atoi(s)
+    if err != nil {
+         return err
+    }
+    *fi = FlexUInt64(i)
+    return nil
+}
+
 type miningInfo struct {
-	Height         uint64 `json:"height"`
-	BaseTarget     uint64 `json:"baseTarget"`
-	TargetDeadline uint64 `json:"targetDeadline"`
+	Height         FlexUInt64 `json:"height"`
+	BaseTarget     FlexUInt64 `json:"baseTarget"`
+	TargetDeadline FlexUInt64 `json:"targetDeadline"`
 	GenSig         string `json:"generationSignature"`
 	bytes          []byte
 }
@@ -202,7 +222,7 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 				fmt.Sprintf(
 					"{\"deadline\":%d,\"result\":\"success\"}",
 					// stupid miners send unadjusted deadlines, but expect adjusted :-(
-					round.Deadline/curMiningInfo.Load().(*miningInfo).BaseTarget,
+					round.Deadline/uint64(curMiningInfo.Load().(*miningInfo).BaseTarget),
 				)))
 		case exceededMinersPerIP:
 			ctx.SetStatusCode(fasthttp.StatusBadRequest)
@@ -216,7 +236,7 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 
 func main() {
 	if _, err := flags.Parse(&opts); err != nil {
-		log.Fatal(err)
+		return
 	}
 	if opts.ListenAddr == "" {
 		opts.ListenAddr = defaultListenAddr

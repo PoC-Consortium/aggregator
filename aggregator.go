@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/google/go-querystring/query"
-	"github.com/jessevdk/go-flags"
 	"github.com/json-iterator/go"
 	"github.com/patrickmn/go-cache"
+	"github.com/spf13/viper"
 	"github.com/valyala/fasthttp"
 )
 
@@ -31,6 +31,7 @@ const (
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 type aggregator struct {
+	listenAddress string
 	proxyURL      string
 	cache         *cache.Cache
 	curMiningInfo atomic.Value
@@ -40,21 +41,21 @@ type aggregator struct {
 
 type Aggregator interface{}
 
+var cfg Config
+
+type Config struct {
+	MinersPerIP   int
+	ListenAddress string
+	ProxyURL      string
+	CertFile      string
+	KeyFile       string
+}
+
 // var requestsPerSec int
 
 var errSubmissionWrongFormat = errors.New("submission has wrong format")
 var errTooManySubmissionsDifferenMiners = errors.New("too many submissions from different account ids by same ip")
 var errUnknownRequestType = errors.New("unknown request type")
-
-var opts struct {
-	MinersPerIP int `short:"m" long:"miners-per-ip" description:"miners allowed per ip"`
-	// ReqsPerSec  uint   `short:"r" long:"allowed-requests-per-sec" description:"allowed requests per second per ip"`
-	SubmitURL  string `short:"u" long:"submit-url" description:"url to forward nonces to (pool, wallet)" required:"true"`
-	ListenAddr string `short:"l" long:"listen-address" description:"address proxy listens on"`
-
-	CertFile string `short:"c" long:"cert-file" description:"certificate file for tls"`
-	KeyFile  string `short:"k" long:"key-file" description:"key file for tls"`
-}
 
 type minerRound struct {
 	AccountID uint64 `url:"accountId"`
@@ -238,7 +239,7 @@ func (a *aggregator) requestHandler(ctx *fasthttp.RequestCtx) {
 	}
 }
 
-func (a *aggregator) run() {
+func (a *aggregator) run(listenAddress, certFile, keyFile string) {
 	if err := a.refreshMiningInfo(); err != nil {
 		log.Fatalln("get initial mining info: ", err)
 	}
@@ -252,10 +253,10 @@ func (a *aggregator) run() {
 	}()
 
 	var err error
-	if opts.CertFile == "" {
-		err = fasthttp.ListenAndServe(opts.ListenAddr, a.requestHandler)
+	if certFile == "" {
+		err = fasthttp.ListenAndServe(listenAddress, a.requestHandler)
 	} else {
-		err = fasthttp.ListenAndServeTLS(opts.ListenAddr, opts.CertFile, opts.KeyFile, a.requestHandler)
+		err = fasthttp.ListenAndServeTLS(listenAddress, certFile, keyFile, a.requestHandler)
 	}
 	if err != nil {
 		log.Fatalf("listen and serve: %s", err)
@@ -271,20 +272,19 @@ func newAggregator(minersPerIP int, proxyURL string) *aggregator {
 	}
 }
 
-func main() {
-	if _, err := flags.Parse(&opts); err != nil {
-		return
-	}
-	if opts.ListenAddr == "" {
-		opts.ListenAddr = defaultListenAddr
-	}
-	var minersPerIP int
-	if opts.MinersPerIP == 0 {
-		minersPerIP = defaultMinersPerIP
-	} else {
-		minersPerIP = opts.MinersPerIP
-	}
+func init() {
+	viper.SetDefault("MinersPerIP", 5)
+	viper.SetDefault("ListenAddress", "127.0.0.1:6655")
 
-	a := newAggregator(minersPerIP, opts.SubmitURL)
-	a.run()
+	viper.SetConfigFile("config.yml")
+	viper.ReadInConfig()
+
+	if err := viper.Unmarshal(&cfg); err != nil {
+		panic(err)
+	}
+}
+
+func main() {
+	a := newAggregator(cfg.MinersPerIP, cfg.ProxyURL)
+	a.run(cfg.ListenAddress, cfg.CertFile, cfg.KeyFile)
 }

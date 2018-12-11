@@ -30,11 +30,15 @@ const (
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
-var submitURL string
-var c *cache.Cache
-var curMiningInfo atomic.Value
-var client *fasthttp.Client
-var minersPerIP int
+type aggregator struct {
+	proxyURL      string
+	cache         *cache.Cache
+	curMiningInfo atomic.Value
+	client        *fasthttp.Client
+	minersPerIP   int
+}
+
+type Aggregator interface{}
 
 // var requestsPerSec int
 
@@ -64,26 +68,26 @@ type minerRound struct {
 type FlexUInt64 int
 
 func (fi *FlexUInt64) UnmarshalJSON(b []byte) error {
-    if b[0] != '"' {
-        return json.Unmarshal(b, (*int)(fi))
-    }
-    var s string
-    if err := json.Unmarshal(b, &s); err != nil {
-        return err
-    }
-    i, err := strconv.Atoi(s)
-    if err != nil {
-         return err
-    }
-    *fi = FlexUInt64(i)
-    return nil
+	if b[0] != '"' {
+		return json.Unmarshal(b, (*int)(fi))
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	i, err := strconv.Atoi(s)
+	if err != nil {
+		return err
+	}
+	*fi = FlexUInt64(i)
+	return nil
 }
 
 type miningInfo struct {
 	Height         FlexUInt64 `json:"height"`
 	BaseTarget     FlexUInt64 `json:"baseTarget"`
 	TargetDeadline FlexUInt64 `json:"targetDeadline"`
-	GenSig         string `json:"generationSignature"`
+	GenSig         string     `json:"generationSignature"`
 	bytes          []byte
 }
 
@@ -92,15 +96,15 @@ type ipData struct {
 	sync.Mutex
 }
 
-func tryUpdateRound(ctx *fasthttp.RequestCtx, ip string, round *minerRound) int {
+func (a *aggregator) tryUpdateRound(ctx *fasthttp.RequestCtx, ip string, round *minerRound) int {
 	accountID := round.AccountID
-	ipDataV, exists := c.Get(ip)
+	ipDataV, exists := a.cache.Get(ip)
 	if !exists {
-		err := proxySubmitRound(ctx, round)
+		err := a.proxySubmitRound(ctx, round)
 		if err != nil {
 			return remoteErr
 		}
-		c.SetDefault(ip, &ipData{
+		a.cache.SetDefault(ip, &ipData{
 			accountIDtoRound: map[uint64]*minerRound{
 				accountID: round,
 			},
@@ -113,7 +117,7 @@ func tryUpdateRound(ctx *fasthttp.RequestCtx, ip string, round *minerRound) int 
 	existingRound, exists := ipData.accountIDtoRound[accountID]
 	if !exists {
 		minerCount := len(ipData.accountIDtoRound)
-		if minerCount == minersPerIP {
+		if minerCount == a.minersPerIP {
 			for _, otherRound := range ipData.accountIDtoRound {
 				if otherRound.Height < round.Height {
 					delete(ipData.accountIDtoRound, otherRound.AccountID)
@@ -127,7 +131,7 @@ func tryUpdateRound(ctx *fasthttp.RequestCtx, ip string, round *minerRound) int 
 		return notUpdated
 	}
 update:
-	if err := proxySubmitRound(ctx, round); err != nil {
+	if err := a.proxySubmitRound(ctx, round); err != nil {
 		return remoteErr
 	}
 	ipData.accountIDtoRound[accountID] = round
@@ -159,9 +163,9 @@ func parseRound(ctx *fasthttp.RequestCtx) (*minerRound, error) {
 	}, nil
 }
 
-func proxySubmitRound(ctx *fasthttp.RequestCtx, round *minerRound) error {
+func (a *aggregator) proxySubmitRound(ctx *fasthttp.RequestCtx, round *minerRound) error {
 	v, _ := query.Values(round)
-	_, respBody, err := client.Post(nil, submitURL+"/burst?requestType=submitNonce&"+v.Encode(), nil)
+	_, respBody, err := a.client.Post(nil, a.proxyURL+"/burst?requestType=submitNonce&"+v.Encode(), nil)
 	if err != nil {
 		ctx.SetBody(errBytesFor(3, "error reaching pool or wallet"))
 		return err
@@ -174,8 +178,8 @@ func errBytesFor(code int, msg string) []byte {
 	return []byte(fmt.Sprintf("{\"error\":{\"code\":%d,\"message\":\"%v\"}}", code, msg))
 }
 
-func refreshMiningInfo() error {
-	_, respBody, err := client.Get(nil, submitURL+"/burst?requestType=getMiningInfo")
+func (a *aggregator) refreshMiningInfo() error {
+	_, respBody, err := a.client.Get(nil, a.proxyURL+"/burst?requestType=getMiningInfo")
 	if err != nil {
 		return err
 	}
@@ -184,30 +188,30 @@ func refreshMiningInfo() error {
 		return err
 	}
 	var curMi *miningInfo
-	if curMiV := curMiningInfo.Load(); curMiV != nil {
+	if curMiV := a.curMiningInfo.Load(); curMiV != nil {
 		curMi = curMiV.(*miningInfo)
 	}
 	switch {
 	case curMi == nil || curMi.Height < mi.Height:
 		mi.bytes = respBody
-		curMiningInfo.Store(&mi)
+		a.curMiningInfo.Store(&mi)
 	case curMi.Height > mi.Height: // fork handling
 		mi.bytes = respBody
-		curMiningInfo.Store(&mi)
-		c.Flush()
+		a.curMiningInfo.Store(&mi)
+		a.cache.Flush()
 	case curMi.BaseTarget != mi.BaseTarget: // fork handling
 		mi.bytes = respBody
-		curMiningInfo.Store(&mi)
-		c.Flush()
+		a.curMiningInfo.Store(&mi)
+		a.cache.Flush()
 	}
 	return nil
 }
 
-func requestHandler(ctx *fasthttp.RequestCtx) {
+func (a *aggregator) requestHandler(ctx *fasthttp.RequestCtx) {
 	ip := ctx.RemoteIP()
 	switch reqType := string(ctx.FormValue("requestType")); reqType {
 	case "getMiningInfo":
-		ctx.SetBody(curMiningInfo.Load().(*miningInfo).bytes)
+		ctx.SetBody(a.curMiningInfo.Load().(*miningInfo).bytes)
 	case "submitNonce":
 		round, err := parseRound(ctx)
 		if err != nil {
@@ -215,14 +219,14 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 			ctx.SetBody(errBytesFor(1, err.Error()))
 			return
 		}
-		switch res := tryUpdateRound(ctx, ip.String(), round); res {
+		switch res := a.tryUpdateRound(ctx, ip.String(), round); res {
 		case updated:
 		case notUpdated:
 			ctx.SetBody([]byte(
 				fmt.Sprintf(
 					"{\"deadline\":%d,\"result\":\"success\"}",
 					// stupid miners send unadjusted deadlines, but expect adjusted :-(
-					round.Deadline/uint64(curMiningInfo.Load().(*miningInfo).BaseTarget),
+					round.Deadline/uint64(a.curMiningInfo.Load().(*miningInfo).BaseTarget),
 				)))
 		case exceededMinersPerIP:
 			ctx.SetStatusCode(fasthttp.StatusBadRequest)
@@ -234,6 +238,39 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 	}
 }
 
+func (a *aggregator) run() {
+	if err := a.refreshMiningInfo(); err != nil {
+		log.Fatalln("get initial mining info: ", err)
+	}
+	go func() {
+		t := time.NewTicker(1 * time.Second)
+		for {
+			for range t.C {
+				_ = a.refreshMiningInfo()
+			}
+		}
+	}()
+
+	var err error
+	if opts.CertFile == "" {
+		err = fasthttp.ListenAndServe(opts.ListenAddr, a.requestHandler)
+	} else {
+		err = fasthttp.ListenAndServeTLS(opts.ListenAddr, opts.CertFile, opts.KeyFile, a.requestHandler)
+	}
+	if err != nil {
+		log.Fatalf("listen and serve: %s", err)
+	}
+}
+
+func newAggregator(minersPerIP int, proxyURL string) *aggregator {
+	return &aggregator{
+		client:      &fasthttp.Client{},
+		minersPerIP: minersPerIP,
+		proxyURL:    proxyURL,
+		cache:       cache.New(defaultCacheExpiration, defaultCacheExpiration),
+	}
+}
+
 func main() {
 	if _, err := flags.Parse(&opts); err != nil {
 		return
@@ -241,36 +278,13 @@ func main() {
 	if opts.ListenAddr == "" {
 		opts.ListenAddr = defaultListenAddr
 	}
+	var minersPerIP int
 	if opts.MinersPerIP == 0 {
 		minersPerIP = defaultMinersPerIP
 	} else {
 		minersPerIP = opts.MinersPerIP
 	}
-	submitURL = opts.SubmitURL
 
-	client = &fasthttp.Client{}
-
-	if err := refreshMiningInfo(); err != nil {
-		log.Fatalln("get initial mining info: ", err)
-	}
-	go func() {
-		t := time.NewTicker(1 * time.Second)
-		for {
-			for range t.C {
-				_ = refreshMiningInfo()
-			}
-		}
-	}()
-
-	c = cache.New(defaultCacheExpiration, defaultCacheExpiration)
-
-	var err error
-	if opts.CertFile == "" {
-		err = fasthttp.ListenAndServe(opts.ListenAddr, requestHandler)
-	} else {
-		err = fasthttp.ListenAndServeTLS(opts.ListenAddr, opts.CertFile, opts.KeyFile, requestHandler)
-	}
-	if err != nil {
-		log.Fatalf("listen and serve: %s", err)
-	}
+	a := newAggregator(minersPerIP, opts.SubmitURL)
+	a.run()
 }

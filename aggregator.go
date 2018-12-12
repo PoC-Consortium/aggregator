@@ -173,9 +173,11 @@ func parseRound(ctx *fasthttp.RequestCtx) (*minerRound, error) {
 
 func (a *aggregator) proxySubmitRound(ctx *fasthttp.RequestCtx, round *minerRound) error {
 	v, _ := query.Values(round)
-	// pool mode if no passphrase is present
+	// pool mode if no passphrase is present, else wallet mode
 	if round.Passphrase == "" {
 		v.Del("secretPhrase")
+	} else {
+		v.Del("deadline")
 	}
 
 	_, respBody, err := a.client.Post(nil, a.proxyURL+"/burst?requestType=submitNonce&"+v.Encode(), nil)

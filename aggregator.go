@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/go-querystring/query"
-	"github.com/json-iterator/go"
-	"github.com/patrickmn/go-cache"
+	jsoniter "github.com/json-iterator/go"
+	cache "github.com/patrickmn/go-cache"
 	"github.com/spf13/viper"
 	"github.com/valyala/fasthttp"
 )
@@ -58,10 +58,11 @@ var errTooManySubmissionsDifferenMiners = errors.New("too many submissions from 
 var errUnknownRequestType = errors.New("unknown request type")
 
 type minerRound struct {
-	AccountID uint64 `url:"accountId"`
-	Height    uint64 `url:"blockheight"`
-	Deadline  uint64 `url:"deadline"`
-	Nonce     uint64 `url:"nonce"`
+	AccountID  uint64 `url:"accountId"`
+	Height     uint64 `url:"blockheight"`
+	Deadline   uint64 `url:"deadline"`
+	Nonce      uint64 `url:"nonce"`
+	Passphrase string `url:"secretPhrase"`
 }
 
 // handling json type inconsistencies of pools and wallets. integers are sometimes sent as string
@@ -156,16 +157,27 @@ func parseRound(ctx *fasthttp.RequestCtx) (*minerRound, error) {
 	if err != nil {
 		return nil, errSubmissionWrongFormat
 	}
+	passphrase := ""
+	passphraseEncoded := ctx.FormValue("secretPhrase")
+	if passphraseEncoded != nil {
+		passphrase = string(passphraseEncoded)
+	}
 	return &minerRound{
-		Deadline:  deadline,
-		Nonce:     nonce,
-		Height:    height,
-		AccountID: accountID,
+		Deadline:   deadline,
+		Nonce:      nonce,
+		Height:     height,
+		AccountID:  accountID,
+		Passphrase: passphrase,
 	}, nil
 }
 
 func (a *aggregator) proxySubmitRound(ctx *fasthttp.RequestCtx, round *minerRound) error {
 	v, _ := query.Values(round)
+	// pool mode if no passphrase is present
+	if round.Passphrase == "" {
+		v.Del("secretPhrase")
+	}
+
 	_, respBody, err := a.client.Post(nil, a.proxyURL+"/burst?requestType=submitNonce&"+v.Encode(), nil)
 	if err != nil {
 		ctx.SetBody(errBytesFor(3, "error reaching pool or wallet"))

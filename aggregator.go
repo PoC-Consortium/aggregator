@@ -62,7 +62,7 @@ type minerRound struct {
 	Height     uint64 `url:"blockheight"`
 	Deadline   uint64 `url:"deadline"`
 	Nonce      uint64 `url:"nonce"`
-	Passphrase string `url:"secretPhrase"`
+	Passphrase string `url:"secretPhrase,omitempty"`
 }
 
 // handling json type inconsistencies of pools and wallets. integers are sometimes sent as string
@@ -157,11 +157,7 @@ func parseRound(ctx *fasthttp.RequestCtx) (*minerRound, error) {
 	if err != nil {
 		return nil, errSubmissionWrongFormat
 	}
-	passphrase := ""
-	passphraseEncoded := ctx.FormValue("secretPhrase")
-	if passphraseEncoded != nil {
-		passphrase = string(passphraseEncoded)
-	}
+	passphrase := string(ctx.FormValue("secretPhrase"))
 	return &minerRound{
 		Deadline:   deadline,
 		Nonce:      nonce,
@@ -174,9 +170,7 @@ func parseRound(ctx *fasthttp.RequestCtx) (*minerRound, error) {
 func (a *aggregator) proxySubmitRound(ctx *fasthttp.RequestCtx, round *minerRound) error {
 	v, _ := query.Values(round)
 	// pool mode if no passphrase is present, else wallet mode
-	if round.Passphrase == "" {
-		v.Del("secretPhrase")
-	} else {
+	if round.Passphrase != "" {
 		v.Del("deadline")
 	}
 

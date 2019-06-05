@@ -1,60 +1,95 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
+	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
+	"strings"
 
 	"github.com/google/go-querystring/query"
 	jsoniter "github.com/json-iterator/go"
 	cache "github.com/patrickmn/go-cache"
 	"github.com/spf13/viper"
+	"github.com/throttled/throttled"
+	"github.com/throttled/throttled/store/memstore"
 	"github.com/valyala/fasthttp"
 )
 
 const (
-	defaultMinersPerIP     = 3
-	defaultRequestsPerSec  = 3
 	defaultCacheExpiration = 15 * time.Minute
-	defaultListenAddr      = "127.0.0.1:6655"
-
-	exceededMinersPerIP = 0
-	notUpdated          = 1
-	updated             = 2
-	remoteErr           = 3
+	minerCacheExpiration = 60 * time.Second
+	exceededMinersPerIP    = 0
+	notUpdated             = 1
+	updated                = 2
+	remoteErr              = 3
+	wrongHeight            = 4
 )
 
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
+// modules
+var jsonx = jsoniter.ConfigCompatibleWithStandardLibrary
+var client *fasthttp.Client
+var websocketClient *websocketAPI
 
-type aggregator struct {
-	listenAddress string
-	proxyURL      string
-	cache         *cache.Cache
-	curMiningInfo atomic.Value
-	client        *fasthttp.Client
-	minersPerIP   int
-}
+// config
+var listenAddr string
+var displayMiners bool
+var primarySubmitURL string
+var primTDL uint64
+var primBest uint64
+var primaryPassphrase string
+var primaryIPForwarding bool
+var primaryIgnoreWorseDeadlines bool
+var primaryws bool
+var secondarySubmitURL string
+var secTDL uint64
+var secBest uint64
+var secondaryPassphrase string
+var secondaryIPForwarding bool
+var secondaryIgnoreWorseDeadlines bool
+var secondaryws bool
+var minerName string
+var accountKey string
 
-type Aggregator interface{}
+var fileLogging bool
 
-var cfg Config
+var scanTime int64
+var rateLimit int
+var burstRate int
+var minersPerIP int
+var lieDetector bool
 
-type Config struct {
-	MinersPerIP   int
-	ListenAddress string
-	ProxyURL      string
-	CertFile      string
-	KeyFile       string
-}
+// state variables
+var currentPrimChain atomicBool
+var currentHeight uint64
+var currentBaseTarget uint64 = 1
+var curPrimaryMiningInfo atomic.Value
 
-// var requestsPerSec int
+// last state variables
+var lastPrimChain atomicBool
+var lastHeight uint64
+var lastBaseTarget uint64 = 1
+var curSecondaryMiningInfo atomic.Value
 
-var errSubmissionWrongFormat = errors.New("submission has wrong format")
-var errTooManySubmissionsDifferenMiners = errors.New("too many submissions from different account ids by same ip")
+// caches
+var primc *cache.Cache
+var secc *cache.Cache
+var liarsCache *cache.Cache
+
+// errors
+var errSubmissionWrongFormatDeadline = errors.New("deadline submission has wrong format")
+var errSubmissionWrongFormatNonce = errors.New("nonce submission has wrong format")
+var errSubmissionWrongFormatBlockHeight = errors.New("blockheight submission has wrong format")
+var errSubmissionWrongFormatAccountID = errors.New("account id submission has wrong format")
+var errTooManySubmissionsDifferentMiners = errors.New("too many submissions from different account ids by same ip")
 var errUnknownRequestType = errors.New("unknown request type")
 
 type minerRound struct {
@@ -62,27 +97,8 @@ type minerRound struct {
 	Height     uint64 `url:"blockheight"`
 	Deadline   uint64 `url:"deadline"`
 	Nonce      uint64 `url:"nonce"`
-	Passphrase string `url:"secretPhrase,omitempty"`
-}
-
-// handling json type inconsistencies of pools and wallets. integers are sometimes sent as string
-// https://engineering.bitnami.com/articles/dealing-with-json-with-non-homogeneous-types-in-go.html
-type FlexUInt64 int
-
-func (fi *FlexUInt64) UnmarshalJSON(b []byte) error {
-	if b[0] != '"' {
-		return json.Unmarshal(b, (*int)(fi))
-	}
-	var s string
-	if err := json.Unmarshal(b, &s); err != nil {
-		return err
-	}
-	i, err := strconv.Atoi(s)
-	if err != nil {
-		return err
-	}
-	*fi = FlexUInt64(i)
-	return nil
+	Passphrase string `url:"secretPhrase"`
+	Adjusted   bool
 }
 
 type miningInfo struct {
@@ -91,6 +107,11 @@ type miningInfo struct {
 	TargetDeadline FlexUInt64 `json:"targetDeadline"`
 	GenSig         string     `json:"generationSignature"`
 	bytes          []byte
+	StartTime      time.Time
+}
+
+type submitResponse struct {
+	Deadline FlexUInt64 `json:"deadline"`
 }
 
 type ipData struct {
@@ -98,19 +119,83 @@ type ipData struct {
 	sync.Mutex
 }
 
-func (a *aggregator) tryUpdateRound(ctx *fasthttp.RequestCtx, ip string, round *minerRound) int {
+func tryUpdateRound(w *http.ResponseWriter, r *http.Request, ip string, round *minerRound) int {
 	accountID := round.AccountID
-	ipDataV, exists := a.cache.Get(ip)
+	// check if submission is late (height mismatch) if chain wasn't switched.
+	if round.Height != atomic.LoadUint64(&currentHeight) && currentPrimChain.Get() == lastPrimChain.Get() {
+		log.Println("DL out-dated:", round.Height, round.AccountID, round.Nonce, "X"+strconv.FormatUint(round.Deadline, 10))
+		return wrongHeight
+	}
+
+	// check if submission belong to previous block.
+	if round.Height != atomic.LoadUint64(&currentHeight) && round.Height != atomic.LoadUint64(&lastHeight) {
+		log.Println("DL out-dated:", round.Height, round.AccountID, round.Nonce, "X"+strconv.FormatUint(round.Deadline, 10))
+		return wrongHeight
+	}
+
+	// you lie I lie
+	_, exists := liarsCache.Get(ip)
+	if exists {
+		return notUpdated
+	}
+
+	// load relevant data
+	var primChain = true
+	var baseTarget uint64 = 1
+	if round.Height == atomic.LoadUint64(&currentHeight) {
+		primChain = currentPrimChain.Get()
+		baseTarget = atomic.LoadUint64(&currentBaseTarget)
+	} else {
+		primChain = lastPrimChain.Get()
+		baseTarget = atomic.LoadUint64(&lastBaseTarget)
+	}
+	deadline := round.Deadline
+	if !round.Adjusted {
+		deadline /= baseTarget
+	}
+
+	// deadlines filter
+	if (primChain && (deadline > primTDL)) || (!primChain && (deadline > secTDL)) {
+		log.Println("DL filtered:", round.Height, round.AccountID, round.Nonce, deadline)
+		return notUpdated
+	}
+	if (primChain && (deadline > atomic.LoadUint64(&primBest)) && primaryIgnoreWorseDeadlines) || (!primChain && (deadline > atomic.LoadUint64(&secBest) && secondaryIgnoreWorseDeadlines)) {
+		log.Println("DL discarded:", round.Height, round.AccountID, round.Nonce, deadline)
+		return notUpdated
+	}
+
+	var ipDataV interface{}
+
+	if primChain {
+		ipDataV, exists = primc.Get(ip)
+	} else {
+		ipDataV, exists = secc.Get(ip)
+	}
+
 	if !exists {
-		err := a.proxySubmitRound(ctx, round)
+		err := proxySubmitRound(w, r, ip, round, primChain, baseTarget)
 		if err != nil {
 			return remoteErr
 		}
-		a.cache.SetDefault(ip, &ipData{
-			accountIDtoRound: map[uint64]*minerRound{
-				accountID: round,
-			},
-		})
+		if primChain {
+			primc.SetDefault(ip, &ipData{
+				accountIDtoRound: map[uint64]*minerRound{
+					accountID: round,
+				},
+			})
+		} else {
+			secc.SetDefault(ip, &ipData{
+				accountIDtoRound: map[uint64]*minerRound{
+					accountID: round,
+				},
+			})
+		}
+		if primChain {
+			atomic.StoreUint64(&primBest, deadline)
+		} else {
+			atomic.StoreUint64(&secBest, deadline)
+		}
+		log.Println("DL response:", round.Height, round.AccountID, round.Nonce, deadline)
 		return updated
 	}
 	ipData := ipDataV.(*ipData)
@@ -119,180 +204,571 @@ func (a *aggregator) tryUpdateRound(ctx *fasthttp.RequestCtx, ip string, round *
 	existingRound, exists := ipData.accountIDtoRound[accountID]
 	if !exists {
 		minerCount := len(ipData.accountIDtoRound)
-		if minerCount == a.minersPerIP {
+		if minerCount == minersPerIP {
 			for _, otherRound := range ipData.accountIDtoRound {
 				if otherRound.Height < round.Height {
 					delete(ipData.accountIDtoRound, otherRound.AccountID)
 					goto update
 				}
 			}
+			log.Println("DL rejected:", round.Height, round.AccountID, round.Nonce, deadline)
 			return exceededMinersPerIP
 		}
-	} else if existingRound.Height > round.Height || existingRound.Height == round.Height &&
-		existingRound.Deadline < round.Deadline {
-		return notUpdated
+	} else {
+		existingDeadline := existingRound.Deadline
+		if !existingRound.Adjusted {
+			existingDeadline /= baseTarget
+		}
+		if existingRound.Height > round.Height || existingRound.Height == round.Height &&
+			existingDeadline < deadline {
+			log.Println("DL ignored:", round.Height, round.AccountID, round.Nonce, deadline)
+			return notUpdated
+		}
 	}
 update:
-	if err := a.proxySubmitRound(ctx, round); err != nil {
+	if err := proxySubmitRound(w, r, ip, round, primChain, baseTarget); err != nil {
 		return remoteErr
 	}
 	ipData.accountIDtoRound[accountID] = round
+	if primChain {
+		atomic.StoreUint64(&primBest, deadline)
+	} else {
+		atomic.StoreUint64(&secBest, deadline)
+	}
+	log.Println("DL response:", round.Height, round.AccountID, round.Nonce, deadline)
 	return updated
 }
 
-func parseRound(ctx *fasthttp.RequestCtx) (*minerRound, error) {
-	deadline, err := strconv.ParseUint(string(ctx.FormValue("deadline")), 10, 64)
+func parseRound(r *http.Request) (*minerRound, error) {
+	adjusted := false
+	deadline, err := strconv.ParseUint((*r).FormValue("deadline"), 10, 64)
 	if err != nil {
-		return nil, errSubmissionWrongFormat
+		// inefficient mining software detected :p
+		deadline, err = strconv.ParseUint((*r).Header.Get("X-Deadline"), 10, 64)
+		if err != nil {
+			return nil, errSubmissionWrongFormatDeadline
+		}
+		adjusted = true
 	}
-	nonce, err := strconv.ParseUint(string(ctx.FormValue("nonce")), 10, 64)
+	nonce, err := strconv.ParseUint((*r).FormValue("nonce"), 10, 64)
 	if err != nil {
-		return nil, errSubmissionWrongFormat
+		return nil, errSubmissionWrongFormatNonce
 	}
-	height, err := strconv.ParseUint(string(ctx.FormValue("blockheight")), 10, 64)
+	height, err := strconv.ParseUint((*r).FormValue("blockheight"), 10, 64)
 	if err != nil {
-		return nil, errSubmissionWrongFormat
+		return nil, errSubmissionWrongFormatBlockHeight
 	}
-	accountID, err := strconv.ParseUint(string(ctx.FormValue("accountId")), 10, 64)
+	accountID, err := strconv.ParseUint((*r).FormValue("accountId"), 10, 64)
 	if err != nil {
-		return nil, errSubmissionWrongFormat
+		return nil, errSubmissionWrongFormatAccountID
 	}
-	passphrase := string(ctx.FormValue("secretPhrase"))
+
+	passphrase := (*r).FormValue("secretPhrase")
+
 	return &minerRound{
 		Deadline:   deadline,
 		Nonce:      nonce,
 		Height:     height,
 		AccountID:  accountID,
 		Passphrase: passphrase,
+		Adjusted:   adjusted,
 	}, nil
 }
 
-func (a *aggregator) proxySubmitRound(ctx *fasthttp.RequestCtx, round *minerRound) error {
+func proxySubmitRound(w *http.ResponseWriter, r *http.Request, ip string, round *minerRound, primary bool, baseTarget uint64) error {
+	// websocket api handling
+	if (primary && primaryws) || (!primary && secondaryws) {
+		// fire submission
+		websocketClient.submitNonce(round.AccountID, round.Height, round.Nonce, round.Deadline)
+		log.Println("DL fired:", round.Height, round.AccountID, round.Nonce, round.Deadline)
+		// fake answer
+		var baseTarget = atomic.LoadUint64(&currentBaseTarget)
+		if round.Height != atomic.LoadUint64(&currentHeight) {
+			baseTarget = atomic.LoadUint64(&lastBaseTarget)
+		}
+		deadline := round.Deadline
+		if !round.Adjusted {
+			deadline /= baseTarget
+		}
+		(*w).Write([]byte(fmt.Sprintf("{\"deadline\":%d,\"result\":\"success\"}", deadline)))
+		return nil
+	}
+	
+	// passphrase overwrites
+	if primary && primaryPassphrase != "" {
+		round.Passphrase = primaryPassphrase
+	}
+	if !primary && secondaryPassphrase != "" {
+		round.Passphrase = secondaryPassphrase
+	}
+	
 	v, _ := query.Values(round)
-	// pool mode if no passphrase is present, else wallet mode
-	if round.Passphrase != "" {
+	// treat unadj dl
+	if round.Adjusted {
 		v.Del("deadline")
 	}
 
-	_, respBody, err := a.client.Post(nil, a.proxyURL+"/burst?requestType=submitNonce&"+v.Encode(), nil)
+	// treat pool
+	if round.Passphrase == "" {
+		v.Del("secretPhrase")
+	} else {
+		v.Del("deadline")
+	}
+
+	v.Del("Adjusted")
+
+	var submitURL string
+	if primary {
+		submitURL = primarySubmitURL
+	} else {
+		submitURL = secondarySubmitURL
+	}
+
+	req := fasthttp.AcquireRequest()
+	req.URI().Update(submitURL + "/burst?requestType=submitNonce&" + v.Encode())
+
+	var miner string
+	if ua := r.Header.Get("User-Agent"); ua == "" {
+		miner = r.Header.Get("X-Miner")
+	} else {
+		miner = ua
+	}
+
+	req.Header.Set("User-Agent", "Aggregator/1.1.0/"+miner)
+	req.Header.Set("X-Miner", "Aggregator/1.1.0/"+miner)
+	req.Header.Set("X-Capacity", strconv.FormatInt(TotalCapacity(), 10))
+
+	// x-forwarded-for
+	if (primary && primaryIPForwarding) || (!primary && secondaryIPForwarding) {
+		ip, _, err := net.SplitHostPort(ip)
+		if err == nil {
+			req.Header.Set("X-Forwarded-For", ip)
+		}
+	}
+
+	req.Header.SetMethodBytes([]byte("POST"))
+	resp := fasthttp.AcquireResponse()
+	err := client.Do(req, resp)
+
 	if err != nil {
-		ctx.SetBody(errBytesFor(3, "error reaching pool or wallet"))
+		(*w).Write(formatJSONError(3, "error reaching pool or wallet"))
 		return err
 	}
-	ctx.SetBody(respBody)
+
+	// lie detector
+	if lieDetector {
+		var mi submitResponse
+		if err := jsonx.Unmarshal(resp.Body(), &mi); err == nil {
+			deadline := round.Deadline
+			if !round.Adjusted {
+				deadline /= baseTarget
+			}
+			if uint64(mi.Deadline) != deadline {
+				var liar = true
+				liarsCache.SetDefault(ip, &liar)
+				log.Println("Liar detected:", round.Height, ip, mi.Deadline, deadline)
+			}
+		}
+	}
+
+	(*w).Write(resp.Body())
 	return nil
 }
 
-func errBytesFor(code int, msg string) []byte {
-	return []byte(fmt.Sprintf("{\"error\":{\"code\":%d,\"message\":\"%v\"}}", code, msg))
-}
-
-func (a *aggregator) refreshMiningInfo() error {
-	_, respBody, err := a.client.Get(nil, a.proxyURL+"/burst?requestType=getMiningInfo")
-	if err != nil {
-		return err
-	}
+func refreshMiningInfo() error {
+	// primary chain
 	var mi miningInfo
-	if err := json.Unmarshal(respBody, &mi); err != nil {
-		return err
+	var errchain1 error
+	if primaryws {
+		if available.Get() {
+			mi = *currentMiningInfo.Load().(*miningInfo);
+		} else {
+			// initial mining info missing
+			errchain1 = fmt.Errorf("primary chain: initial mining info missing")
+		}
+	} else {
+		_, respBody, err1 := client.Get(nil, primarySubmitURL+"/burst?requestType=getMiningInfo")
+		errchain1 = err1
+		if errchain1 == nil {
+			if err := jsonx.Unmarshal(respBody, &mi); err != nil {
+				return err
+			}
+		}
 	}
-	var curMi *miningInfo
-	if curMiV := a.curMiningInfo.Load(); curMiV != nil {
-		curMi = curMiV.(*miningInfo)
+
+	var curPrimMi *miningInfo
+	if curPrimMiV := curPrimaryMiningInfo.Load(); curPrimMiV != nil {
+		curPrimMi = curPrimMiV.(*miningInfo)
 	}
+
+	var curSecMi *miningInfo
+	if curSecMiV := curSecondaryMiningInfo.Load(); curSecMiV != nil {
+		curSecMi = curSecMiV.(*miningInfo)
+	}
+
+	var lastPrimaryStart = time.Time{}
+	if curPrimMi != nil {
+		lastPrimaryStart = curPrimMi.StartTime
+	}
+
+	var lastSecondaryStart = time.Time{}
+	if curSecMi != nil {
+		lastSecondaryStart = curSecMi.StartTime
+	}
+	if errchain1 == nil {
+		switch {
+		case curPrimMi == nil || curPrimMi.Height < mi.Height:
+			log.Println("New Block", mi.Height, mi.BaseTarget, mi.TargetDeadline, mi.GenSig)
+			if displayMiners {
+				DisplayMiners()
+			}
+			mi.bytes, _ = json.Marshal(map[string]string{
+				"height":              fmt.Sprintf("%d", mi.Height),
+				"baseTarget":          fmt.Sprintf("%d", mi.BaseTarget),
+				"generationSignature": mi.GenSig})
+			mi.StartTime = time.Now()
+			curPrimaryMiningInfo.Store(&mi)
+			if !currentPrimChain.Get() {
+				atomic.StoreUint64(&lastBaseTarget, atomic.LoadUint64(&currentBaseTarget))
+				atomic.StoreUint64(&lastHeight, atomic.LoadUint64(&currentHeight))
+				lastPrimChain.Set(false)
+			}
+			atomic.StoreUint64(&currentBaseTarget, uint64(mi.BaseTarget))
+			atomic.StoreUint64(&currentHeight, uint64(mi.Height))
+			currentPrimChain.Set(true)
+			atomic.StoreUint64(&primBest, ^uint64(0))
+			// reschedule secondary chain on interrupt
+			if int64(time.Now().Sub(lastSecondaryStart).Seconds()) < scanTime {
+				reset := miningInfo{0, 0, 0, "", []byte{0}, time.Time{}}
+				curSecondaryMiningInfo.Store(&reset)
+			}
+			return nil
+		case curPrimMi.Height > mi.Height: // fork handling
+			log.Println("New Block", mi.Height, mi.BaseTarget, mi.TargetDeadline, mi.GenSig)
+			if displayMiners {
+				DisplayMiners()
+			}
+			mi.bytes, _ = json.Marshal(map[string]string{
+				"height":              fmt.Sprintf("%d", mi.Height),
+				"baseTarget":          fmt.Sprintf("%d", mi.BaseTarget),
+				"generationSignature": mi.GenSig})
+			mi.StartTime = time.Now()
+			curPrimaryMiningInfo.Store(&mi)
+			primc.Flush()
+			if !currentPrimChain.Get() {
+				atomic.StoreUint64(&lastBaseTarget, atomic.LoadUint64(&currentBaseTarget))
+				atomic.StoreUint64(&lastHeight, atomic.LoadUint64(&currentHeight))
+				lastPrimChain.Set(false)
+			}
+			atomic.StoreUint64(&currentBaseTarget, uint64(mi.BaseTarget))
+			atomic.StoreUint64(&currentHeight, uint64(mi.Height))
+			currentPrimChain.Set(true)
+			atomic.StoreUint64(&primBest, ^uint64(0))
+			// reschedule secondary chain on interrupt
+			if int64(time.Now().Sub(lastSecondaryStart).Seconds()) < scanTime {
+				reset := miningInfo{0, 0, 0, "", []byte{0}, time.Time{}}
+				curSecondaryMiningInfo.Store(&reset)
+			}
+			return nil
+		case curPrimMi.BaseTarget != mi.BaseTarget: // fork handling
+			log.Println("New Block", mi.Height, mi.BaseTarget, mi.TargetDeadline, mi.GenSig)
+			if displayMiners {
+				DisplayMiners()
+			}
+			mi.bytes, _ = json.Marshal(map[string]string{
+				"height":              fmt.Sprintf("%d", mi.Height),
+				"baseTarget":          fmt.Sprintf("%d", mi.BaseTarget),
+				"generationSignature": mi.GenSig})
+			mi.StartTime = time.Now()
+			curPrimaryMiningInfo.Store(&mi)
+			primc.Flush()
+			if !currentPrimChain.Get() {
+				atomic.StoreUint64(&lastBaseTarget, atomic.LoadUint64(&currentBaseTarget))
+				atomic.StoreUint64(&lastHeight, atomic.LoadUint64(&currentHeight))
+				lastPrimChain.Set(false)
+			}
+			atomic.StoreUint64(&currentBaseTarget, uint64(mi.BaseTarget))
+			atomic.StoreUint64(&currentHeight, uint64(mi.Height))
+			currentPrimChain.Set(true)
+			atomic.StoreUint64(&primBest, ^uint64(0))
+			// reschedule secondary chain on interrupt
+			if int64(time.Now().Sub(lastSecondaryStart).Seconds()) < scanTime {
+				reset := miningInfo{0, 0, 0, "", []byte{0}, time.Time{}}
+				curSecondaryMiningInfo.Store(&reset)
+			}
+			return nil
+		}
+	}
+
+	// single chain
+	if secondarySubmitURL == "" {
+		return nil
+	}
+	// skip secondary if primary is scanning
+	if int64(time.Now().Sub(lastPrimaryStart).Seconds()) < scanTime {
+		return nil
+	}
+
+	// secondary chain
+	var errchain2 error
+	if secondaryws {
+		if available.Get() {
+			mi = *currentMiningInfo.Load().(*miningInfo);
+		} else {
+			// initial mining info missing
+			errchain2 = fmt.Errorf("secondary chain: initial mining info missing")
+			return errchain2
+		}
+	} else {
+		_, respBody, err2 := client.Get(nil, secondarySubmitURL+"/burst?requestType=getMiningInfo")
+		errchain2 = err2
+		if errchain2 == nil {
+			if err := jsonx.Unmarshal(respBody, &mi); err != nil {
+				return err
+			}
+		} else {
+			return errchain2
+		}
+	}
+
 	switch {
-	case curMi == nil || curMi.Height < mi.Height:
-		mi.bytes = respBody
-		a.curMiningInfo.Store(&mi)
-	case curMi.Height > mi.Height: // fork handling
-		mi.bytes = respBody
-		a.curMiningInfo.Store(&mi)
-		a.cache.Flush()
-	case curMi.BaseTarget != mi.BaseTarget: // fork handling
-		mi.bytes = respBody
-		a.curMiningInfo.Store(&mi)
-		a.cache.Flush()
+	case curSecMi == nil || curSecMi.Height < mi.Height:
+		log.Println("New Block", mi.Height, mi.BaseTarget, mi.TargetDeadline, mi.GenSig)
+		if displayMiners {
+			DisplayMiners()
+		}
+		mi.bytes, _ = json.Marshal(map[string]string{
+			"height":              fmt.Sprintf("%d", mi.Height),
+			"baseTarget":          fmt.Sprintf("%d", mi.BaseTarget),
+			"generationSignature": mi.GenSig})
+		mi.StartTime = time.Now()
+		curSecondaryMiningInfo.Store(&mi)
+
+		if currentPrimChain.Get() {
+			atomic.StoreUint64(&lastBaseTarget, atomic.LoadUint64(&currentBaseTarget))
+			atomic.StoreUint64(&lastHeight, atomic.LoadUint64(&currentHeight))
+			lastPrimChain.Set(true)
+		}
+		atomic.StoreUint64(&currentBaseTarget, uint64(mi.BaseTarget))
+		atomic.StoreUint64(&currentHeight, uint64(mi.Height))
+		currentPrimChain.Set(false)
+		atomic.StoreUint64(&secBest, ^uint64(0))
+		return nil
+	case curSecMi.Height > mi.Height: // fork handling
+		log.Println("New Block", mi.Height, mi.BaseTarget, mi.TargetDeadline, mi.GenSig)
+		if displayMiners {
+			DisplayMiners()
+		}
+		mi.bytes, _ = json.Marshal(map[string]string{
+			"height":              fmt.Sprintf("%d", mi.Height),
+			"baseTarget":          fmt.Sprintf("%d", mi.BaseTarget),
+			"generationSignature": mi.GenSig})
+		mi.StartTime = time.Now()
+		curSecondaryMiningInfo.Store(&mi)
+		secc.Flush()
+		if currentPrimChain.Get() {
+			atomic.StoreUint64(&lastBaseTarget, atomic.LoadUint64(&currentBaseTarget))
+			atomic.StoreUint64(&lastHeight, atomic.LoadUint64(&currentHeight))
+			lastPrimChain.Set(true)
+		}
+		atomic.StoreUint64(&currentBaseTarget, uint64(mi.BaseTarget))
+		atomic.StoreUint64(&currentHeight, uint64(mi.Height))
+		currentPrimChain.Set(true)
+		atomic.StoreUint64(&secBest, ^uint64(0))
+		return nil
+	case curSecMi.BaseTarget != mi.BaseTarget: // fork handling
+		log.Println("New Block", mi.Height, mi.BaseTarget, mi.TargetDeadline, mi.GenSig)
+		if displayMiners {
+			DisplayMiners()
+		}
+		mi.bytes, _ = json.Marshal(map[string]string{
+			"height":              fmt.Sprintf("%d", mi.Height),
+			"baseTarget":          fmt.Sprintf("%d", mi.BaseTarget),
+			"generationSignature": mi.GenSig})
+		mi.StartTime = time.Now()
+		curSecondaryMiningInfo.Store(&mi)
+		secc.Flush()
+		if currentPrimChain.Get() {
+			atomic.StoreUint64(&lastBaseTarget, atomic.LoadUint64(&currentBaseTarget))
+			atomic.StoreUint64(&lastHeight, atomic.LoadUint64(&currentHeight))
+			lastPrimChain.Set(true)
+		}
+		atomic.StoreUint64(&currentBaseTarget, uint64(mi.BaseTarget))
+		atomic.StoreUint64(&currentHeight, uint64(mi.Height))
+		currentPrimChain.Set(false)
+		atomic.StoreUint64(&secBest, ^uint64(0))
+		return nil
 	}
 	return nil
 }
 
-func (a *aggregator) requestHandler(ctx *fasthttp.RequestCtx) {
-	ip := ctx.RemoteIP()
-	switch reqType := string(ctx.FormValue("requestType")); reqType {
+func requestHandler(w http.ResponseWriter, r *http.Request) {
+	ipport := r.RemoteAddr
+	ip, _,_ := net.SplitHostPort(ipport)
+	switch reqType := string(r.FormValue("requestType")); reqType {
 	case "getMiningInfo":
-		ctx.SetBody(a.curMiningInfo.Load().(*miningInfo).bytes)
+		if currentPrimChain.Get() {
+			w.Write(curPrimaryMiningInfo.Load().(*miningInfo).bytes)
+		} else {
+			w.Write(curSecondaryMiningInfo.Load().(*miningInfo).bytes)
+		}
+		// log client
+		var miner string
+		if ua := r.Header.Get("User-Agent"); ua == "" {
+			miner = r.Header.Get("X-Miner")
+		} else {
+			miner = ua
+		}
+		size, _ := strconv.ParseInt(r.Header.Get("X-Capacity"), 10, 64)
+		UpdateClient(ip,miner,size)
+		websocketClient.UpdateSize(TotalCapacity());
+
 	case "submitNonce":
-		round, err := parseRound(ctx)
+		round, err := parseRound(r)
 		if err != nil {
-			ctx.SetStatusCode(fasthttp.StatusBadRequest)
-			ctx.SetBody(errBytesFor(1, err.Error()))
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(formatJSONError(1, err.Error()))
 			return
 		}
-		switch res := a.tryUpdateRound(ctx, ip.String(), round); res {
+		switch res := tryUpdateRound(&w, r, ip, round); res {
 		case updated:
 		case notUpdated:
-			ctx.SetBody([]byte(
-				fmt.Sprintf(
-					"{\"deadline\":%d,\"result\":\"success\"}",
-					// stupid miners send unadjusted deadlines, but expect adjusted :-(
-					round.Deadline/uint64(a.curMiningInfo.Load().(*miningInfo).BaseTarget),
-				)))
+			var baseTarget= atomic.LoadUint64(&currentBaseTarget)
+			if round.Height != atomic.LoadUint64(&currentHeight) {
+				baseTarget = atomic.LoadUint64(&lastBaseTarget)
+			}
+			deadline := round.Deadline
+			if !round.Adjusted {
+				deadline /= baseTarget
+			}
+			w.Write([]byte(fmt.Sprintf("{\"deadline\":%d,\"result\":\"success\"}", deadline)))
+		case wrongHeight:
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(formatJSONError(1005, "Submitted on wrong height"))
 		case exceededMinersPerIP:
-			ctx.SetStatusCode(fasthttp.StatusBadRequest)
-			ctx.SetBody(errBytesFor(2, errTooManySubmissionsDifferenMiners.Error()))
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write(formatJSONError(2, errTooManySubmissionsDifferentMiners.Error()))
 		}
 	default:
-		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		ctx.SetBody(errBytesFor(4, errUnknownRequestType.Error()))
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(formatJSONError(4, errUnknownRequestType.Error()))
 	}
 }
 
-func (a *aggregator) run(listenAddress, certFile, keyFile string) {
-	if err := a.refreshMiningInfo(); err != nil {
+func main() {
+	log.Println("Aggregator v.1.2.0")
+
+	viper.SetConfigName("config")
+	viper.AddConfigPath(".")
+	err := viper.ReadInConfig()
+	if err != nil {
+		panic(fmt.Errorf("fatal error config file: %s", err))
+	}
+
+	client = &fasthttp.Client{NoDefaultUserAgentHeader: true}
+	client.MaxIdleConnDuration = 0 * time.Millisecond
+
+	listenAddr = viper.GetString("listenAddr")
+	displayMiners = viper.GetBool("displayMiners")
+	log.Println("Proxy address:", listenAddr)
+	minersPerIP = viper.GetInt("minersPerIP")
+	primarySubmitURL = viper.GetString("primarySubmitURL")
+	primaryPassphrase = viper.GetString("primaryPassphrase")
+	primaryIPForwarding = viper.GetBool("primaryIpForwarding")
+	primaryIgnoreWorseDeadlines = viper.GetBool("primaryIgnoreWorseDeadlines")
+	primTDL = uint64(viper.GetInt64("primaryTargetDeadline"))
+	secondarySubmitURL = viper.GetString("secondarySubmitURL")
+	secondaryPassphrase = viper.GetString("secondaryPassphrase")
+	secondaryIPForwarding = viper.GetBool("secondaryIpForwarding")
+	secondaryIgnoreWorseDeadlines = viper.GetBool("secondaryIgnoreWorseDeadlines")
+	secTDL = uint64(viper.GetInt64("secondaryTargetDeadline"))
+	fileLogging = viper.GetBool("fileLogging")
+
+	scanTime = viper.GetInt64("scanTime")
+	rateLimit = viper.GetInt("rateLimit")
+	burstRate = viper.GetInt("burstRate")
+	lieDetector = viper.GetBool("lieDetector")
+	log.Println("Primary chain:", primarySubmitURL)
+	log.Println("Secondary chain:", secondarySubmitURL)
+	log.Println("Rate Limiter:", "limit="+strconv.Itoa(rateLimit), "per second, burstrate="+strconv.Itoa(burstRate))
+	minerName = viper.GetString("minerName")
+	accountKey = viper.GetString("accountKey")
+
+	// todo check exactly one url is wss
+	primaryws = strings.HasPrefix(primarySubmitURL, "wss");
+	secondaryws = strings.HasPrefix(secondarySubmitURL, "wss");
+	
+	if primaryws && secondaryws {
+		panic("can only have a single websocket upstream")
+	}
+
+	// launch api
+	if primaryws {
+		websocketClient = newWebsocketAPI(primarySubmitURL, accountKey, minerName, 0)
+		websocketClient.Connect()
+	}
+
+	if secondaryws {
+		websocketClient = newWebsocketAPI(secondarySubmitURL, accountKey, minerName, 0)
+		websocketClient.Connect()
+	}
+	// amend submit & getMiningInfo
+
+	if fileLogging {
+		logFile, err := os.OpenFile("log.txt", os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
+		if err != nil {
+			panic(err)
+		}
+
+		mw := io.MultiWriter(os.Stdout, logFile)
+		log.SetOutput(mw)
+	}
+
+	clients = cache.New(minerCacheExpiration , minerCacheExpiration )
+
+	if err := refreshMiningInfo(); err != nil {
 		log.Fatalln("get initial mining info: ", err)
 	}
 	go func() {
 		t := time.NewTicker(1 * time.Second)
 		for {
 			for range t.C {
-				_ = a.refreshMiningInfo()
+				_ = refreshMiningInfo()
 			}
 		}
 	}()
 
-	var err error
-	if certFile == "" {
-		err = fasthttp.ListenAndServe(listenAddress, a.requestHandler)
-	} else {
-		err = fasthttp.ListenAndServeTLS(listenAddress, certFile, keyFile, a.requestHandler)
+	
+	primc = cache.New(defaultCacheExpiration, defaultCacheExpiration)
+	secc = cache.New(defaultCacheExpiration, defaultCacheExpiration)
+	liarsCache = cache.New(defaultCacheExpiration, defaultCacheExpiration)
+
+	store, err := memstore.New(65536)
+	if err != nil {
+		log.Fatal(err)
 	}
+
+	quota := throttled.RateQuota{MaxRate: throttled.PerSec(rateLimit), MaxBurst: burstRate}
+	rateLimiter, err := throttled.NewGCRARateLimiter(store, quota)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	httpRateLimiter := throttled.HTTPRateLimiter{
+		RateLimiter: rateLimiter,
+		VaryBy:      &throttled.VaryBy{Path: true},
+	}
+
+	h := http.HandlerFunc(requestHandler)
+	err = fasthttp.ListenAndServe(listenAddr, NewFastHTTPHandler(httpRateLimiter.RateLimit(h)))
 	if err != nil {
 		log.Fatalf("listen and serve: %s", err)
 	}
 }
 
-func newAggregator(minersPerIP int, proxyURL string) *aggregator {
-	return &aggregator{
-		client:      &fasthttp.Client{},
-		minersPerIP: minersPerIP,
-		proxyURL:    proxyURL,
-		cache:       cache.New(defaultCacheExpiration, defaultCacheExpiration),
-	}
-}
-
-func init() {
-	viper.SetDefault("MinersPerIP", 5)
-	viper.SetDefault("ListenAddress", "127.0.0.1:6655")
-
-	viper.SetConfigFile("config.yml")
-	viper.ReadInConfig()
-
-	if err := viper.Unmarshal(&cfg); err != nil {
-		panic(err)
-	}
-}
-
-func main() {
-	a := newAggregator(cfg.MinersPerIP, cfg.ProxyURL)
-	a.run(cfg.ListenAddress, cfg.CertFile, cfg.KeyFile)
+func formatJSONError(errorCode int64, errorMsg string) []uint8 {
+	bytes, _ := json.Marshal(map[string]string{
+		"errorCode":        strconv.FormatInt(errorCode, 10),
+		"errorDescription": errorMsg})
+	return bytes
 }

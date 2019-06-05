@@ -1,0 +1,28 @@
+# aggregator configuration
+listenAddr: "127.0.0.1:7777"                                # address proxy listens on
+scanTime: 20                                                # your maximum scantime in seconds (collision avoidance)
+displayMiners: true                                         # displays info on connected miners at the beginning of each round
+primarySubmitURL: "http://50-50-pool.burst.cryptoguru.org:8124" # primary chain:    url to forward nonces to (pool, wallet)
+primaryTargetDeadline: 31536000                             # primary chain:    target deadline
+primaryPassphrase: ""                                       # primary chain:    passphrase overwrite (optional), empty -> passphrase from client will be forwarded if any
+primaryIpForwarding: false                                  # primary chain:    set X-Forwarded-For Headder                                
+primaryIgnoreWorseDeadlines: false                          # primary chain:    ignore a deadline if a better deadline has already been found. 
+
+secondarySubmitURL: "wss://ecominer.hdpool.com"             # secondary chain:  url to forward nonces to (pool, wallet)
+secondaryTargetDeadline: 1000000000                         # secondary chain:  target deadline
+secondaryPassphrase: ""                                     # secondary chain:  passphrase overwrite (optional), empty -> passphrase from client will be forwarded if any
+secondaryIpForwarding: false                                # secondary chain:  set X-Forwarded-For Headder                                
+secondaryIgnoreWorseDeadlines: true                         # secondary chain:  ignore a deadline if a better deadline has already been found. 
+
+# websocket api
+minerName: "Aggregator"                                     # miner name
+accountKey: ""                                              # account key 
+
+# logging
+fileLogging: false                                          # log information to log.txt
+
+# aggregator protection
+minersPerIP: 100                                            # miners allowed per ip
+rateLimit: 45                                               # maximum requests per second per IP
+burstRate: 10                                               # rate limiter burst rate
+lieDetector: false                                          # ignore miner for 15min if false deadline has been sent

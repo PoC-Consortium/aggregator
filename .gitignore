@@ -1,2 +1,4 @@
 vendor
 aggregator
+**/*.exe
+**/log.txt

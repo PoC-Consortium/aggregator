@@ -48,6 +48,7 @@ var primBest uint64
 var primaryPassphrase string
 var primaryIPForwarding bool
 var primaryIgnoreWorseDeadlines bool
+var primaryAccountKey string
 var primaryws bool
 var secondarySubmitURL string
 var secTDL uint64
@@ -55,9 +56,9 @@ var secBest uint64
 var secondaryPassphrase string
 var secondaryIPForwarding bool
 var secondaryIgnoreWorseDeadlines bool
+var secondaryAccountKey string
 var secondaryws bool
 var minerName string
-var accountKey string
 
 var fileLogging bool
 
@@ -337,6 +338,11 @@ func proxySubmitRound(w *http.ResponseWriter, r *http.Request, ip string, round 
 	req.Header.Set("User-Agent", "Aggregator/1.1.0/"+miner)
 	req.Header.Set("X-Miner", "Aggregator/1.1.0/"+miner)
 	req.Header.Set("X-Capacity", strconv.FormatInt(TotalCapacity(), 10))
+	if primary{
+		req.Header.Set("X-Account", primaryAccountKey)
+	} else {
+		req.Header.Set("X-Account", secondaryAccountKey)
+	}
 
 	// x-forwarded-for
 	if (primary && primaryIPForwarding) || (!primary && secondaryIPForwarding) {
@@ -656,7 +662,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	log.Println("Aggregator v.1.2.0")
+	log.Println("Aggregator v.1.2.2")
 
 	viper.SetConfigName("config")
 	viper.AddConfigPath(".")
@@ -676,11 +682,13 @@ func main() {
 	primaryPassphrase = viper.GetString("primaryPassphrase")
 	primaryIPForwarding = viper.GetBool("primaryIpForwarding")
 	primaryIgnoreWorseDeadlines = viper.GetBool("primaryIgnoreWorseDeadlines")
+	primaryAccountKey = viper.GetString("primaryAccountKey")
 	primTDL = uint64(viper.GetInt64("primaryTargetDeadline"))
 	secondarySubmitURL = viper.GetString("secondarySubmitURL")
 	secondaryPassphrase = viper.GetString("secondaryPassphrase")
 	secondaryIPForwarding = viper.GetBool("secondaryIpForwarding")
 	secondaryIgnoreWorseDeadlines = viper.GetBool("secondaryIgnoreWorseDeadlines")
+	secondaryAccountKey = viper.GetString("secondaryAccountKey")
 	secTDL = uint64(viper.GetInt64("secondaryTargetDeadline"))
 	fileLogging = viper.GetBool("fileLogging")
 
@@ -692,7 +700,6 @@ func main() {
 	log.Println("Secondary chain:", secondarySubmitURL)
 	log.Println("Rate Limiter:", "limit="+strconv.Itoa(rateLimit), "per second, burstrate="+strconv.Itoa(burstRate))
 	minerName = viper.GetString("minerName")
-	accountKey = viper.GetString("accountKey")
 
 	// todo check exactly one url is wss
 	primaryws = strings.HasPrefix(primarySubmitURL, "wss");
@@ -704,12 +711,12 @@ func main() {
 
 	// launch api
 	if primaryws {
-		websocketClient = newWebsocketAPI(primarySubmitURL, accountKey, minerName, 0)
+		websocketClient = newWebsocketAPI(primarySubmitURL, primaryAccountKey, minerName, 0)
 		websocketClient.Connect()
 	}
 
 	if secondaryws {
-		websocketClient = newWebsocketAPI(secondarySubmitURL, accountKey, minerName, 0)
+		websocketClient = newWebsocketAPI(secondarySubmitURL, secondaryAccountKey, minerName, 0)
 		websocketClient.Connect()
 	}
 	// amend submit & getMiningInfo

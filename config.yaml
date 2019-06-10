@@ -7,16 +7,17 @@ primaryTargetDeadline: 31536000                             # primary chain:    
 primaryPassphrase: ""                                       # primary chain:    passphrase overwrite (optional), empty -> passphrase from client will be forwarded if any
 primaryIpForwarding: false                                  # primary chain:    set X-Forwarded-For Headder                                
 primaryIgnoreWorseDeadlines: false                          # primary chain:    ignore a deadline if a better deadline has already been found. 
+primaryAccountKey: ""                                       # primary chain:    account key 
 
 secondarySubmitURL: "wss://ecominer.hdpool.com"             # secondary chain:  url to forward nonces to (pool, wallet)
 secondaryTargetDeadline: 1000000000                         # secondary chain:  target deadline
 secondaryPassphrase: ""                                     # secondary chain:  passphrase overwrite (optional), empty -> passphrase from client will be forwarded if any
 secondaryIpForwarding: false                                # secondary chain:  set X-Forwarded-For Headder                                
 secondaryIgnoreWorseDeadlines: true                         # secondary chain:  ignore a deadline if a better deadline has already been found. 
+secondaryAccountKey: ""                                     # secondary chain:  account key 
 
-# websocket api
+# additonal info
 minerName: "Aggregator"                                     # miner name
-accountKey: ""                                              # account key 
 
 # logging
 fileLogging: false                                          # log information to log.txt

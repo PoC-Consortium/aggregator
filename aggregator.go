@@ -630,7 +630,9 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		size, _ := strconv.ParseInt(r.Header.Get("X-Capacity"), 10, 64)
 		UpdateClient(ip,miner,size)
-		websocketClient.UpdateSize(TotalCapacity());
+		if primaryws || secondaryws {
+			websocketClient.UpdateSize(TotalCapacity());
+		}
 
 	case "submitNonce":
 		round, err := parseRound(r)

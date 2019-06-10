@@ -18,6 +18,7 @@ secondaryAccountKey: ""                                     # secondary chain:  
 
 # additonal info
 minerName: "Aggregator"                                     # miner name
+minerAlias: ""                                              # miner alias
 
 # logging
 fileLogging: false                                          # log information to log.txt

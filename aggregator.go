@@ -25,6 +25,7 @@ import (
 )
 
 const (
+	version = "1.2.2"
 	defaultCacheExpiration = 15 * time.Minute
 	minerCacheExpiration = 60 * time.Second
 	exceededMinersPerIP    = 0
@@ -59,6 +60,7 @@ var secondaryIgnoreWorseDeadlines bool
 var secondaryAccountKey string
 var secondaryws bool
 var minerName string
+var minerAlias string
 
 var fileLogging bool
 
@@ -335,8 +337,9 @@ func proxySubmitRound(w *http.ResponseWriter, r *http.Request, ip string, round 
 		miner = ua
 	}
 
-	req.Header.Set("User-Agent", "Aggregator/1.1.0/"+miner)
-	req.Header.Set("X-Miner", "Aggregator/1.1.0/"+miner)
+	req.Header.Set("User-Agent", "Aggregator/"+version+"/"+miner)
+	req.Header.Set("X-Miner", "Aggregator/"+version+"/"+miner)
+	req.Header.Set("X-MinerAlias", minerAlias)
 	req.Header.Set("X-Capacity", strconv.FormatInt(TotalCapacity(), 10))
 	if primary{
 		req.Header.Set("X-Account", primaryAccountKey)
@@ -662,7 +665,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	log.Println("Aggregator v.1.2.2")
+	log.Println("Aggregator v."+version)
 
 	viper.SetConfigName("config")
 	viper.AddConfigPath(".")
@@ -700,6 +703,7 @@ func main() {
 	log.Println("Secondary chain:", secondarySubmitURL)
 	log.Println("Rate Limiter:", "limit="+strconv.Itoa(rateLimit), "per second, burstrate="+strconv.Itoa(burstRate))
 	minerName = viper.GetString("minerName")
+	minerAlias = viper.GetString("minerAlias")
 
 	// todo check exactly one url is wss
 	primaryws = strings.HasPrefix(primarySubmitURL, "wss");

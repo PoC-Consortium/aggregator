@@ -139,8 +139,6 @@ func (c *websocketAPI) subscribe() error {
 	ct := time.Now()
 	lastHeartBeat.Store(ct)
 	ticker := time.NewTicker(time.Duration(frequency) * time.Second)
-	ci := clientInfo{c.accountKey,c.ci.MinerName,c.ci.MinerName+".hdproxy.exe."+hdproxyVersion, c.ci.Capacity}
-	hb := websocketMessage{"poolmgr.heartbeat",ci}
 	go func() {
 		for {
 		select {
@@ -157,6 +155,8 @@ func (c *websocketAPI) subscribe() error {
 					c.Close()
 					//c.Connect()						
 				}
+				ci := clientInfo{c.accountKey,c.ci.MinerName,c.ci.MinerName+".hdproxy.exe."+hdproxyVersion, c.ci.Capacity}
+				hb := websocketMessage{"poolmgr.heartbeat",ci}
 				req, err := jsonx.MarshalToString(&hb);
 				if err != nil {
 					return

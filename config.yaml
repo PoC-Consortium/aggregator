@@ -2,6 +2,8 @@
 listenAddr: "127.0.0.1:7777"                                # address proxy listens on
 scanTime: 20                                                # your maximum scantime in seconds (collision avoidance)
 displayMiners: true                                         # displays info on connected miners at the beginning of each round
+
+#primary chain
 primarySubmitURL: "http://50-50-pool.burst.cryptoguru.org:8124" # primary chain:    url to forward nonces to (pool, wallet)
 primaryTargetDeadline: 31536000                             # primary chain:    target deadline
 primaryPassphrase: ""                                       # primary chain:    passphrase overwrite (optional), empty -> passphrase from client will be forwarded if any
@@ -9,6 +11,7 @@ primaryIpForwarding: false                                  # primary chain:    
 primaryIgnoreWorseDeadlines: false                          # primary chain:    ignore a deadline if a better deadline has already been found. 
 primaryAccountKey: ""                                       # primary chain:    account key 
 
+#secondary chain
 secondarySubmitURL: "wss://ecominer.hdpool.com"             # secondary chain:  url to forward nonces to (pool, wallet)
 secondaryTargetDeadline: 1000000000                         # secondary chain:  target deadline
 secondaryPassphrase: ""                                     # secondary chain:  passphrase overwrite (optional), empty -> passphrase from client will be forwarded if any

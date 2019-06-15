@@ -86,7 +86,9 @@ func newWebsocketAPI(server string, accountKey string, minerName string, capacit
 }
 
 func (c *websocketAPI) UpdateSize(totalSize int64){
+	c.sendMu.Lock()
 	c.ci.Capacity = totalSize
+	c.sendMu.Unlock()
 }
 
 func (c *websocketAPI) Close() {
@@ -100,7 +102,9 @@ func (c *websocketAPI) Connect() {
 	// message handler
 	go func() {
 		for {
+			c.receiveMu.Lock()
 			messageType, message, err := c.rc.ReadMessage()
+			c.receiveMu.Unlock()
 			if err != nil {
 				continue
 			}
@@ -110,7 +114,6 @@ func (c *websocketAPI) Connect() {
 				onTextMessage(string(message))
 
 			}
-
 		}
 	}()
 }
@@ -120,19 +123,22 @@ func (c *websocketAPI) subscribe() error {
 	signal.Notify(interrupt, os.Interrupt)
 
 	// request initial mining info
+	c.sendMu.Lock()
 	if err := c.rc.WriteMessage(1, []byte("{\"cmd\":\"mining_info\",\"para\":{}}")); err != nil {
 		log.Printf("Error: WriteMessage %s", c.rc.GetURL())
 		return err
 	}
+	c.sendMu.Unlock()
 	// subscribe for future mining infos
 	channelName := "poolmgr.mining_info"
 	subscribeObject := getSubscribeEventObject(channelName, 0)
 	subscribeData := serializeDataIntoString(subscribeObject)
-
+	c.sendMu.Lock()
 	if err := c.rc.WriteMessage(1, []byte(subscribeData)); err != nil {
 		log.Printf("Error: WriteMessage %s", c.rc.GetURL())
 		return err
 	}
+	c.sendMu.Unlock()
 	// subscribe to heartbeat
 	// cancel existing
 	// create new
@@ -152,16 +158,19 @@ func (c *websocketAPI) subscribe() error {
 					log.Println("websocket api: heartbeat lost, trying to reconnect...")
 					ct := time.Now()
 					lastHeartBeat.Store(ct)
-					c.Close()
-					//c.Connect()						
+					c.Close()					
 				}
+				c.sendMu.Lock()
 				ci := clientInfo{c.accountKey,c.ci.MinerName,c.ci.MinerName+".hdproxy.exe."+hdproxyVersion, c.ci.Capacity}
 				hb := websocketMessage{"poolmgr.heartbeat",ci}
 				req, err := jsonx.MarshalToString(&hb);
 				if err != nil {
 					return
 				}
+				// debug
+				// log.Println(req)
 				c.rc.WriteMessage(1, []byte(req))
+				c.sendMu.Unlock()
 			case <- interrupt:
 				ticker.Stop()
 				os.Exit(0)
@@ -239,13 +248,16 @@ func serializeDataIntoString(data interface{}) string {
 }
 
 func (c *websocketAPI) submitNonce(accountID uint64, height uint64, nonce uint64, deadline uint64){
+	c.sendMu.Lock()
 	nd := nonceData{accountID, height, strconv.FormatUint(nonce,10), deadline, time.Now().Unix()}
 	ns := nonceSubmission{c.ci.AccountKey,c.ci.MinerName,"",c.ci.Capacity,[]nonceData{nd}}
 	hb := websocketMessage{"poolmgr.submit_nonce",ns}
 	req, err := jsonx.MarshalToString(&hb);
-	// debug log.Println(req)
+	// debug
+	// log.Println(req)
 	if err != nil {
 		return
 	}
 	c.rc.WriteMessage(1, []byte(req))
+	c.sendMu.Unlock()
 }

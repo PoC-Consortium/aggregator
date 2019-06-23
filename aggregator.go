@@ -396,10 +396,17 @@ func refreshMiningInfo() error {
 			errchain1 = fmt.Errorf("primary chain: initial mining info missing")
 		}
 	} else {
-		_, respBody, err1 := client.Get(nil, primarySubmitURL+"/burst?requestType=getMiningInfo")
+		req := fasthttp.AcquireRequest()
+		req.URI().Update(primarySubmitURL +"/burst?requestType=getMiningInfo")
+		req.Header.Set("User-Agent", "Aggregator/"+version)
+		req.Header.Set("X-Miner", "Aggregator/"+version)
+		req.Header.Set("X-Capacity", strconv.FormatInt(TotalCapacity(), 10))
+		req.Header.SetMethodBytes([]byte("GET"))
+		resp := fasthttp.AcquireResponse()
+		err1 := client.Do(req, resp)
 		errchain1 = err1
 		if errchain1 == nil {
-			if err := jsonx.Unmarshal(respBody, &mi); err != nil {
+			if err := jsonx.Unmarshal(resp.Body(), &mi); err != nil {
 				return err
 			}
 		}
@@ -529,10 +536,17 @@ func refreshMiningInfo() error {
 			return errchain2
 		}
 	} else {
-		_, respBody, err2 := client.Get(nil, secondarySubmitURL+"/burst?requestType=getMiningInfo")
+		req := fasthttp.AcquireRequest()
+		req.URI().Update(secondarySubmitURL +"/burst?requestType=getMiningInfo")
+		req.Header.Set("User-Agent", "Aggregator/"+version)
+		req.Header.Set("X-Miner", "Aggregator/"+version)
+		req.Header.Set("X-Capacity", strconv.FormatInt(TotalCapacity(), 10))
+		req.Header.SetMethodBytes([]byte("GET"))
+		resp := fasthttp.AcquireResponse()
+		err2 := client.Do(req, resp)
 		errchain2 = err2
 		if errchain2 == nil {
-			if err := jsonx.Unmarshal(respBody, &mi); err != nil {
+			if err := jsonx.Unmarshal(resp.Body(), &mi); err != nil {
 				return err
 			}
 		} else {

@@ -78,10 +78,13 @@ func PrintMiners() string {
 	for key, value := range miners {
 		miner := value.Object.(*clientData)
 		miner.Lock()
-		sb.WriteString(fmt.Sprintf("Miner: %s %s %s %s TiB\n", key, miner.Alias, miner.Id.MinerName, strconv.FormatFloat(float64(miner.Capacity)/1024.0, 'f', 5, 64)))
+		hashrate := float64(miner.Capacity) / 240 / 1000 / 1000 * 8192 * 4 * 1024
+
+		sb.WriteString(fmt.Sprintf("Miner: %s %s %s %sMH/s %sGiB\n", key, miner.Alias, miner.Id.MinerName, strconv.FormatFloat(hashrate), strconv.FormatFloat(float64(miner.Capacity), 'f', 5, 64)))
 		miner.Unlock()
 		count++
 	}
+	sb.WriteString("\n")
 	sb.WriteString(fmt.Sprintf("Total Capacity: %s TiB", strconv.FormatFloat(float64(TotalCapacity())/1024.0, 'f', 5, 64)))
 	return sb.String()
 }

@@ -24,15 +24,16 @@ type clientID struct {
 	IP        string `json:"ip"`
 	Port      string `json:"port"`
 	MinerName string `json:"minerName"`
+	Xpu       string `json:"minerName"`
 	sync.Mutex
 }
 
 var clients *cache.Cache
 
 // UpdateClient refreshed Miner data
-func UpdateClient(ip string, port string, minerName string, alias string, capacity int64) {
+func UpdateClient(ip string, port string, minerName string, alias string, xpu string, capacity int64) {
 	cd := clientData{
-		Id:       clientID{IP: ip, Port: port, MinerName: minerName},
+		Id:       clientID{IP: ip, Port: port, MinerName: minerName, Xpu: xpu},
 		Capacity: capacity,
 		Alias:    alias,
 		Mutex:    sync.Mutex{},
@@ -80,7 +81,7 @@ func PrintMiners() string {
 		miner.Lock()
 		hashrate := float64(miner.Capacity) / 240 / 1000 / 1000 * 8192 * 4 * 1024
 
-		sb.WriteString(fmt.Sprintf("Miner: %s %s %s %sMH/s %sGiB\n", key, miner.Alias, miner.Id.MinerName, strconv.FormatFloat(hashrate, 'f', 2, 64), strconv.FormatFloat(float64(miner.Capacity), 'f', 5, 64)))
+		sb.WriteString(fmt.Sprintf("Miner: %s %s %s %sMH/s %sGiB %s\n", key, miner.Alias, miner.Id.MinerName, strconv.FormatFloat(hashrate, 'f', 2, 64), strconv.FormatFloat(float64(miner.Capacity), 'f', 2, 64), miner.Id.Xpu))
 		miner.Unlock()
 		count++
 	}

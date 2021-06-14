@@ -80,7 +80,7 @@ func PrintMiners() string {
 		miner.Lock()
 		hashrate := float64(miner.Capacity) / 240 / 1000 / 1000 * 8192 * 4 * 1024
 
-		sb.WriteString(fmt.Sprintf("Miner: %s %s %s %sMH/s %sGiB\n", key, miner.Alias, miner.Id.MinerName, strconv.FormatFloat(hashrate), strconv.FormatFloat(float64(miner.Capacity), 'f', 5, 64)))
+		sb.WriteString(fmt.Sprintf("Miner: %s %s %s %sMH/s %sGiB\n", key, miner.Alias, miner.Id.MinerName, strconv.FormatFloat(hashrate, 'f', 2, 64), strconv.FormatFloat(float64(miner.Capacity), 'f', 5, 64)))
 		miner.Unlock()
 		count++
 	}

@@ -648,10 +648,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			miner = ua
 		}
-		var alias string
-		if alias := r.Header.Get("X-mineralias"); alias == "" {
-			alias = "unknown"
-		}
+		alias := r.Header.Get("X-MinerAlias")
 
 		size, _ := strconv.ParseInt(r.Header.Get("X-Capacity"), 10, 64)
 		UpdateClient(ip, port, miner, alias, size)

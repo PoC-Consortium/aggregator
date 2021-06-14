@@ -23,7 +23,7 @@ type clientData struct {
 type clientID struct {
 	IP        string `json:"ip"`
 	MinerName string `json:"minerName"`
-	Xpu       string `json:"minerName"`
+	Xpu       string `json:"xpu"`
 	sync.Mutex
 }
 

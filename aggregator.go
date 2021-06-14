@@ -649,11 +649,10 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 			miner = ua
 		}
 		var alias string
-		if ua := r.Header.Get("User-Agent"); ua == "" {
-			alias = r.Header.Get("X-mineralias")
-		} else {
+		if alias := r.Header.Get("X-mineralias"); alias == "" {
 			alias = "unknown"
 		}
+
 		size, _ := strconv.ParseInt(r.Header.Get("X-Capacity"), 10, 64)
 		UpdateClient(ip, port, miner, alias, size)
 		if primaryws || secondaryws {

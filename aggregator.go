@@ -10,10 +10,10 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"strings"
 
 	"github.com/google/go-querystring/query"
 	jsoniter "github.com/json-iterator/go"
@@ -25,9 +25,9 @@ import (
 )
 
 const (
-	version = "1.2.2"
+	version                = "1.2.3"
 	defaultCacheExpiration = 15 * time.Minute
-	minerCacheExpiration = 60 * time.Second
+	minerCacheExpiration   = 60 * time.Second
 	exceededMinersPerIP    = 0
 	notUpdated             = 1
 	updated                = 2
@@ -296,7 +296,7 @@ func proxySubmitRound(w *http.ResponseWriter, r *http.Request, ip string, round 
 		(*w).Write([]byte(fmt.Sprintf("{\"deadline\":%d,\"result\":\"success\"}", deadline)))
 		return nil
 	}
-	
+
 	// passphrase overwrites
 	if primary && primaryPassphrase != "" {
 		round.Passphrase = primaryPassphrase
@@ -304,7 +304,7 @@ func proxySubmitRound(w *http.ResponseWriter, r *http.Request, ip string, round 
 	if !primary && secondaryPassphrase != "" {
 		round.Passphrase = secondaryPassphrase
 	}
-	
+
 	v, _ := query.Values(round)
 	// treat unadj dl
 	if round.Adjusted {
@@ -341,7 +341,7 @@ func proxySubmitRound(w *http.ResponseWriter, r *http.Request, ip string, round 
 	req.Header.Set("X-Miner", "Aggregator/"+version+"/"+miner)
 	req.Header.Set("X-MinerAlias", minerAlias)
 	req.Header.Set("X-Capacity", strconv.FormatInt(TotalCapacity(), 10))
-	if primary{
+	if primary {
 		req.Header.Set("X-Account", primaryAccountKey)
 	} else {
 		req.Header.Set("X-Account", secondaryAccountKey)
@@ -390,14 +390,14 @@ func refreshMiningInfo() error {
 	var errchain1 error
 	if primaryws {
 		if available.Get() {
-			mi = *currentMiningInfo.Load().(*miningInfo);
+			mi = *currentMiningInfo.Load().(*miningInfo)
 		} else {
 			// initial mining info missing
 			errchain1 = fmt.Errorf("primary chain: initial mining info missing")
 		}
 	} else {
 		req := fasthttp.AcquireRequest()
-		req.URI().Update(primarySubmitURL +"/burst?requestType=getMiningInfo")
+		req.URI().Update(primarySubmitURL + "/burst?requestType=getMiningInfo")
 		req.Header.Set("User-Agent", "Aggregator/"+version)
 		req.Header.Set("X-Miner", "Aggregator/"+version)
 		req.Header.Set("X-Capacity", strconv.FormatInt(TotalCapacity(), 10))
@@ -529,7 +529,7 @@ func refreshMiningInfo() error {
 	var errchain2 error
 	if secondaryws {
 		if available.Get() {
-			mi = *currentMiningInfo.Load().(*miningInfo);
+			mi = *currentMiningInfo.Load().(*miningInfo)
 		} else {
 			// initial mining info missing
 			errchain2 = fmt.Errorf("secondary chain: initial mining info missing")
@@ -537,7 +537,7 @@ func refreshMiningInfo() error {
 		}
 	} else {
 		req := fasthttp.AcquireRequest()
-		req.URI().Update(secondarySubmitURL +"/burst?requestType=getMiningInfo")
+		req.URI().Update(secondarySubmitURL + "/burst?requestType=getMiningInfo")
 		req.Header.Set("User-Agent", "Aggregator/"+version)
 		req.Header.Set("X-Miner", "Aggregator/"+version)
 		req.Header.Set("X-Capacity", strconv.FormatInt(TotalCapacity(), 10))
@@ -627,7 +627,7 @@ func refreshMiningInfo() error {
 
 func requestHandler(w http.ResponseWriter, r *http.Request) {
 	ipport := r.RemoteAddr
-	ip, _,_ := net.SplitHostPort(ipport)
+	ip, port, _ := net.SplitHostPort(ipport)
 	switch reqType := string(r.FormValue("requestType")); reqType {
 	case "getMiningInfo":
 		if currentPrimChain.Get() {
@@ -643,9 +643,9 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 			miner = ua
 		}
 		size, _ := strconv.ParseInt(r.Header.Get("X-Capacity"), 10, 64)
-		UpdateClient(ip,miner,size)
+		UpdateClient(ip, port, miner, size)
 		if primaryws || secondaryws {
-			websocketClient.UpdateSize(TotalCapacity());
+			websocketClient.UpdateSize(TotalCapacity())
 		}
 
 	case "submitNonce":
@@ -658,7 +658,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 		switch res := tryUpdateRound(&w, r, ip, round); res {
 		case updated:
 		case notUpdated:
-			var baseTarget= atomic.LoadUint64(&currentBaseTarget)
+			var baseTarget = atomic.LoadUint64(&currentBaseTarget)
 			if round.Height != atomic.LoadUint64(&currentHeight) {
 				baseTarget = atomic.LoadUint64(&lastBaseTarget)
 			}
@@ -681,7 +681,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	log.Println("Aggregator v."+version)
+	log.Println("Aggregator v." + version)
 
 	viper.SetConfigName("config")
 	viper.AddConfigPath(".")
@@ -722,9 +722,9 @@ func main() {
 	minerAlias = viper.GetString("minerAlias")
 
 	// todo check exactly one url is wss
-	primaryws = strings.HasPrefix(primarySubmitURL, "wss");
-	secondaryws = strings.HasPrefix(secondarySubmitURL, "wss");
-	
+	primaryws = strings.HasPrefix(primarySubmitURL, "wss")
+	secondaryws = strings.HasPrefix(secondarySubmitURL, "wss")
+
 	if primaryws && secondaryws {
 		panic("can only have a single websocket upstream")
 	}
@@ -751,7 +751,7 @@ func main() {
 		log.SetOutput(mw)
 	}
 
-	clients = cache.New(minerCacheExpiration , minerCacheExpiration )
+	clients = cache.New(minerCacheExpiration, minerCacheExpiration)
 
 	if err := refreshMiningInfo(); err != nil {
 		log.Fatalln("get initial mining info: ", err)
@@ -765,7 +765,6 @@ func main() {
 		}
 	}()
 
-	
 	primc = cache.New(defaultCacheExpiration, defaultCacheExpiration)
 	secc = cache.New(defaultCacheExpiration, defaultCacheExpiration)
 	liarsCache = cache.New(defaultCacheExpiration, defaultCacheExpiration)

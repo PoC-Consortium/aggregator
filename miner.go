@@ -31,7 +31,12 @@ var clients *cache.Cache
 
 // UpdateClient refreshed Miner data
 func UpdateClient(ip string, port string, minerName string, alias string, capacity int64) {
-	cd := clientData{Id: clientID{IP: ip, Port: port, MinerName: minerName}, Capacity: capacity}
+	cd := clientData{
+		Id:       clientID{IP: ip, Port: port, MinerName: minerName},
+		Capacity: capacity,
+		Alias:    alias,
+		Mutex:    sync.Mutex{},
+	}
 	key := hash(&cd.Id)
 	clients.SetDefault(key, &cd)
 }

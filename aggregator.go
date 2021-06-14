@@ -633,7 +633,7 @@ func statsRequestHandler(w http.ResponseWriter, r *http.Request) {
 
 func requestHandler(w http.ResponseWriter, r *http.Request) {
 	ipport := r.RemoteAddr
-	ip, port, _ := net.SplitHostPort(ipport)
+	ip, _, _ := net.SplitHostPort(ipport)
 	switch reqType := string(r.FormValue("requestType")); reqType {
 	case "getMiningInfo":
 		if currentPrimChain.Get() {
@@ -652,7 +652,7 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 		xpu := r.Header.Get("X-Xpu")
 
 		size, _ := strconv.ParseInt(r.Header.Get("X-Capacity"), 10, 64)
-		UpdateClient(ip, port, miner, alias, xpu, size)
+		UpdateClient(ip, miner, alias, xpu, size)
 		if primaryws || secondaryws {
 			websocketClient.UpdateSize(TotalCapacity())
 		}

@@ -22,7 +22,6 @@ type clientData struct {
 
 type clientID struct {
 	IP        string `json:"ip"`
-	Port      string `json:"port"`
 	MinerName string `json:"minerName"`
 	Xpu       string `json:"minerName"`
 	sync.Mutex
@@ -31,9 +30,9 @@ type clientID struct {
 var clients *cache.Cache
 
 // UpdateClient refreshed Miner data
-func UpdateClient(ip string, port string, minerName string, alias string, xpu string, capacity int64) {
+func UpdateClient(ip string, minerName string, alias string, xpu string, capacity int64) {
 	cd := clientData{
-		Id:       clientID{IP: ip, Port: port, MinerName: minerName, Xpu: xpu},
+		Id:       clientID{IP: ip, MinerName: minerName, Xpu: xpu},
 		Capacity: capacity,
 		Alias:    alias,
 		Mutex:    sync.Mutex{},

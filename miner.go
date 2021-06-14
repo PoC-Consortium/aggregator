@@ -3,8 +3,10 @@ package main
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 
 	cache "github.com/patrickmn/go-cache"
@@ -14,6 +16,7 @@ import (
 type clientData struct {
 	Id       clientID `json:"id"`
 	Capacity int64    `json:"capacity"`
+	Alias    string   `json:"alias"`
 	sync.Mutex
 }
 
@@ -27,10 +30,9 @@ type clientID struct {
 var clients *cache.Cache
 
 // UpdateClient refreshed Miner data
-func UpdateClient(ip string, port string, minerName string, capacity int64) {
-	cid := clientID{IP: ip, Port: port, MinerName: minerName}
-	cd := clientData{Id: cid, Capacity: capacity}
-	key := hash(&cid)
+func UpdateClient(ip string, port string, minerName string, alias string, capacity int64) {
+	cd := clientData{Id: clientID{IP: ip, Port: port, MinerName: minerName}, Capacity: capacity}
+	key := hash(&cd.Id)
 	clients.SetDefault(key, &cd)
 }
 
@@ -58,6 +60,25 @@ func DisplayMiners() {
 		count++
 	}
 	log.Println("Total Capacity:", strconv.FormatFloat(float64(TotalCapacity())/1024.0, 'f', 5, 64), "TiB")
+}
+
+// DisplayMiners shows all miners
+func PrintMiners() string {
+	var sb strings.Builder
+	var count = 0
+	if clients.ItemCount() == 0 {
+		return ""
+	}
+	miners := clients.Items()
+	for key, value := range miners {
+		miner := value.Object.(*clientData)
+		miner.Lock()
+		sb.WriteString(fmt.Sprintf("Miner: %s %s %s %s TiB\n", key, miner.Alias, miner.Id.MinerName, strconv.FormatFloat(float64(miner.Capacity)/1024.0, 'f', 5, 64)))
+		miner.Unlock()
+		count++
+	}
+	sb.WriteString(fmt.Sprintf("Total Capacity: %s TiB", strconv.FormatFloat(float64(TotalCapacity())/1024.0, 'f', 5, 64)))
+	return sb.String()
 }
 
 // TotalCapacity outputs total capacity

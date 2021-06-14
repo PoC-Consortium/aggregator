@@ -42,6 +42,7 @@ var websocketClient *websocketAPI
 
 // config
 var listenAddr string
+var statsListenAddr string
 var displayMiners bool
 var primarySubmitURL string
 var primTDL uint64
@@ -625,6 +626,11 @@ func refreshMiningInfo() error {
 	return nil
 }
 
+func statsRequestHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "Bencher Stats\n\n")
+	fmt.Fprintf(w, PrintMiners())
+}
+
 func requestHandler(w http.ResponseWriter, r *http.Request) {
 	ipport := r.RemoteAddr
 	ip, port, _ := net.SplitHostPort(ipport)
@@ -642,8 +648,14 @@ func requestHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			miner = ua
 		}
+		var alias string
+		if ua := r.Header.Get("User-Agent"); ua == "" {
+			alias = r.Header.Get("X-mineralias")
+		} else {
+			alias = "unknown"
+		}
 		size, _ := strconv.ParseInt(r.Header.Get("X-Capacity"), 10, 64)
-		UpdateClient(ip, port, miner, size)
+		UpdateClient(ip, port, miner, alias, size)
 		if primaryws || secondaryws {
 			websocketClient.UpdateSize(TotalCapacity())
 		}
@@ -694,6 +706,7 @@ func main() {
 	client.MaxIdleConnDuration = 0 * time.Millisecond
 
 	listenAddr = viper.GetString("listenAddr")
+	statsListenAddr = viper.GetString("statslistenAddr")
 	displayMiners = viper.GetBool("displayMiners")
 	log.Println("Proxy address:", listenAddr)
 	minersPerIP = viper.GetInt("minersPerIP")
@@ -786,6 +799,15 @@ func main() {
 	}
 
 	h := http.HandlerFunc(requestHandler)
+	i := http.HandlerFunc(statsRequestHandler)
+
+	go func() {
+		err = fasthttp.ListenAndServe(statsListenAddr, NewFastHTTPHandler(httpRateLimiter.RateLimit(i)))
+		if err != nil {
+			log.Fatalf("listen and serve: %s", err)
+		}
+	}()
+
 	err = fasthttp.ListenAndServe(listenAddr, NewFastHTTPHandler(httpRateLimiter.RateLimit(h)))
 	if err != nil {
 		log.Fatalf("listen and serve: %s", err)

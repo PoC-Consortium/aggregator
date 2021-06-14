@@ -1,5 +1,6 @@
-# aggregator configuration
+# gpufun configuration
 listenAddr: "127.0.0.1:7777"                                # address proxy listens on
+statsListenAddr: "127.0.0.1:80"                             # address proxy listens on
 scanTime: 20                                                # your maximum scantime in seconds (collision avoidance)
 displayMiners: true                                         # displays info on connected miners at the beginning of each round
 
